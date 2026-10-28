@@ -5,7 +5,7 @@ Run locally:  pip install flask  ->  set GEMINI_API_KEY  ->  python arogyamitra.
 Deploy:       gunicorn arogyamitra:app --timeout 120   (Render / Railway)
 Photos are processed in memory only and never saved. This is NOT medical advice.
 """
-import os, re, json, time, base64, binascii, secrets, threading
+import os, re, json, time, base64, binascii, secrets, threading, sqlite3, csv, io
 import urllib.request, urllib.error, urllib.parse
 from flask import Flask, request, jsonify, Response, session
 
@@ -299,6 +299,96 @@ def index():
         url = ""
     return Response(INDEX_HTML.replace("__SAHAYAI__", url), mimetype="text/html")
 
+@app.get("/api/bp")
+def bp_history():
+    """Return BP records for the signed-in user or this browser session."""
+    owner = session.get("user", {}).get("sub")
+    if not owner:
+        owner = session.setdefault("bp_owner", secrets.token_urlsafe(18))
+    with sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), "bp_history.db")) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS bp_readings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL,
+            measured_at TEXT NOT NULL, systolic INTEGER NOT NULL,
+            diastolic INTEGER NOT NULL, pulse INTEGER NOT NULL,
+            source TEXT NOT NULL DEFAULT 'manual', note TEXT NOT NULL DEFAULT '')""")
+        rows = db.execute("SELECT id, measured_at, systolic, diastolic, pulse, source, note FROM bp_readings WHERE owner=? ORDER BY id DESC LIMIT 500", (owner,)).fetchall()
+    return jsonify(readings=[dict(id=r[0], measured_at=r[1], systolic=r[2], diastolic=r[3], pulse=r[4], source=r[5], note=r[6]) for r in rows])
+
+@app.post("/api/bp")
+def save_bp_reading():
+    d = request.get_json(silent=True) or {}
+    try:
+        systolic, diastolic, pulse = int(d.get("systolic")), int(d.get("diastolic")), int(d.get("pulse"))
+    except (TypeError, ValueError):
+        return jsonify(error="Enter systolic, diastolic and pulse as whole numbers."), 400
+    if not 50 <= systolic <= 300 or not 30 <= diastolic <= 200 or not 20 <= pulse <= 250 or diastolic >= systolic:
+        return jsonify(error="Please check the entered values and try again."), 400
+    owner = session.get("user", {}).get("sub")
+    if not owner:
+        owner = session.setdefault("bp_owner", secrets.token_urlsafe(18))
+    measured_at = str(d.get("measured_at") or time.strftime("%Y-%m-%d %H:%M:%S %z"))[:40]
+    note = str(d.get("note") or "")[:250]
+    # Device values must only be submitted here after a real supported device interface is verified.
+    source = "manual"
+    with sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), "bp_history.db")) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS bp_readings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL,
+            measured_at TEXT NOT NULL, systolic INTEGER NOT NULL,
+            diastolic INTEGER NOT NULL, pulse INTEGER NOT NULL,
+            source TEXT NOT NULL DEFAULT 'manual', note TEXT NOT NULL DEFAULT '')""")
+        db.execute("INSERT INTO bp_readings(owner, measured_at, systolic, diastolic, pulse, source, note) VALUES(?,?,?,?,?,?,?)",
+                   (owner, measured_at, systolic, diastolic, pulse, source, note))
+    return jsonify(ok=True)
+
+@app.post("/api/bp/read-display")
+def read_bp_display():
+    """Use vision as an assistive reader for a photographed BP display; never auto-save OCR."""
+    if not KEY:
+        return jsonify(error="Photo reading needs GEMINI_API_KEY. You can still enter the values manually."), 503
+    d = request.get_json(silent=True) or {}
+    m = re.match(r"^data:(image/(?:jpeg|png|webp));base64,(.+)$", str(d.get("image", "")), re.S)
+    if not m:
+        return jsonify(error="Please take or upload a JPEG, PNG or WebP photo."), 400
+    mime, b64 = m.groups()
+    try:
+        raw = base64.b64decode(b64, validate=True)
+        if len(raw) > 5 * 1024 * 1024:
+            return jsonify(error="Photo is too large (maximum 5 MB)."), 413
+    except (binascii.Error, ValueError):
+        return jsonify(error="Invalid image data."), 400
+    prompt = ("Read the numeric values visibly shown on this digital blood pressure monitor display. "
+              "Return JSON only with keys readable (boolean), systolic (integer or null), "
+              "diastolic (integer or null), pulse (integer or null), display_type (string: current, memory, or unknown), "
+              "and note (short string). Identify SYS, DIA, and PULSE/PR labels carefully. "
+              "Do not infer missing or obscured digits; use null and readable=false if uncertain. "
+              "This is OCR only, not medical advice. Do not mistake date, time, user number, or memory index for BP values.")
+    body = {"contents": [{"role": "user", "parts": [{"text": prompt}, {"inline_data": {"mime_type": mime, "data": b64}}]}],
+            "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 300, "temperature": 0}}
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json", "x-goog-api-key": KEY})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            result = json.loads(r.read().decode())
+        parts = (((result.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+        out = "".join(part.get("text", "") for part in parts).strip()
+        out = re.sub(r"^```(?:json)?|```$", "", out).strip()
+        values = json.loads(out)
+        def num(k):
+            v = values.get(k)
+            return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        sysv, diav, pulsv = num("systolic"), num("diastolic"), num("pulse")
+        valid = bool(values.get("readable")) and sysv is not None and diav is not None and pulsv is not None and 50 <= sysv <= 300 and 30 <= diav <= 200 and 20 <= pulsv <= 250 and diav < sysv
+        return jsonify(readable=valid, systolic=sysv, diastolic=diav, pulse=pulsv,
+                       display_type=str(values.get("display_type") or "unknown")[:20],
+                       note=str(values.get("note") or "")[:200],
+                       warning="Please compare every digit with the physical display before saving. Photo reading can be wrong.")
+    except urllib.error.HTTPError as e:
+        app.logger.error("BP display OCR Gemini HTTP %s", e.code)
+        return jsonify(error="Could not read the photo. Try a sharper, well-lit image or enter values manually."), 502
+    except Exception as e:
+        app.logger.error("BP display OCR error: %r", e)
+        return jsonify(error="Could not reliably read this display. Try again or enter values manually."), 502
+
 @app.get("/api/health")
 def health():
     return jsonify(ok=True, ai=bool(KEY), model=MODEL)
@@ -362,7 +452,7 @@ body.big{font-size:20px}
 main{max-width:760px;margin:-34px auto 0;padding:0 14px 40px;position:relative}
 .steps{display:flex;gap:6px;list-style:none;margin:0 0 12px;padding:0}.steps li{flex:1;display:flex;align-items:center;gap:6px;justify-content:center;background:var(--card);border:1px solid var(--bd);border-radius:99px;padding:6px 4px;font-size:14px;color:var(--mu);opacity:.7;transition:.3s}
 .steps li.on{opacity:1;color:#fff;background:linear-gradient(135deg,#0d9488,#0ea5e9);border-color:transparent}.steps i{font-style:normal;font-weight:700}
-.card{background:var(--card);border:1px solid var(--bd);border-radius:20px;padding:18px;margin-bottom:14px;box-shadow:var(--sh);animation:up .4s ease both}@keyframes up{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:20px;padding:18px;margin-bottom:14px;box-shadow:var(--sh);animation:up .4s ease both}.bp-hero{background:linear-gradient(135deg,rgba(13,148,136,.12),rgba(14,165,233,.12));border:1px solid var(--bd);border-radius:22px;padding:18px;margin:10px 0 16px}.bp-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:12px 0}.bp-metric{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:12px;text-align:center}.bp-metric strong{display:block;font-size:clamp(22px,5vw,30px);line-height:1.2}.bp-metric span{font-size:12px;color:var(--mu)}.bp-suggest{border-radius:16px;padding:14px 16px;border:1px solid var(--bd);background:var(--ac2);margin:12px 0}.bp-suggest[data-level="urgent"]{background:#fff0ed;color:#8b2115;border-color:#ffc7bd}.bp-suggest[data-level="high"]{background:var(--wa);color:var(--wt);border-color:transparent}.bp-suggest[data-level="normal"]{background:var(--ac2)}.bp-suggest h3{margin:0 0 5px;font-size:17px}.bp-suggest p{margin:4px 0}.bp-actions{display:flex;flex-wrap:wrap;gap:8px}.bp-actions button{flex:1;min-width:130px}@media(max-width:460px){.bp-metrics{gap:6px}.bp-metric{padding:9px 4px}.bp-metric span{font-size:11px}}@keyframes up{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 #up{text-align:center;border:2px dashed var(--bd)}#up.drag{border-color:var(--ac);background:var(--ac2)}.mu{color:var(--mu);margin-left:8px;font-size:14px}
 .warn{background:var(--wa);color:var(--wt);border-color:transparent;font-size:14px}.warn ul{margin:6px 0 0 18px;padding:0}
 .btn,button{font:inherit;cursor:pointer;border-radius:12px;border:1px solid var(--bd);background:var(--card);color:var(--tx);padding:10px 16px;display:inline-block}
@@ -383,7 +473,7 @@ h2{font-size:20px;margin:20px 4px 10px}.sp{display:inline-block;width:14px;heigh
 @keyframes r{to{transform:rotate(360deg)}}.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 @media print{.hero,#up,.row,.warn,.steps{display:none!important}}
 [hidden]{display:none!important}
-.locked #tabs,.locked #v-scan,.locked #v-hist,.locked #v-chat,.locked #v-near,.locked #v-diet{display:none!important}
+.locked #tabs,.locked #v-scan,.locked #v-hist,.locked #v-chat,.locked #v-near,.locked #v-diet,.locked #v-bp{display:none!important}
 #login{text-align:center}#login p{color:var(--mu)}
 .whow{margin-top:12px;position:relative}#who{display:inline-flex;align-items:center;gap:8px;background:rgba(255,255,255,.2);border-radius:99px;padding:4px}
 #who img{width:28px;height:28px;border-radius:50%}#who span{padding:0 2px}#who button{background:#fff;color:#0f766e;border:0;padding:4px 12px;border-radius:99px;font-size:14px}
@@ -405,7 +495,7 @@ select{font:inherit;padding:8px;border-radius:10px;border:1px solid var(--bd);ba
 .alert{background:#fee2e2;color:#7f1d1d;border-radius:12px;padding:10px 12px;margin-bottom:10px}.alert a{color:#7f1d1d;font-weight:700}
 #cm.live{background:#ef4444;color:#fff}.tip{font-size:15px}.tip .btn{margin-top:8px;text-decoration:none}
 .tabs button{font-size:13px;padding:9px 1px}
-.g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}@media(max-width:520px){.g2{grid-template-columns:1fr}}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}#bpform label{display:block;font-size:14px;color:var(--mu);margin-bottom:3px}#bpform input{width:100%;font:inherit;padding:9px;border-radius:10px;border:1px solid var(--bd);background:var(--bg);color:var(--tx)}@media(max-width:520px){.g2{grid-template-columns:1fr}}
 #dform label{display:block;font-size:14px;color:var(--mu);margin-bottom:3px}#dform label.chk{display:flex;gap:8px;align-items:flex-start;margin:10px 0 0;color:var(--tx);font-size:15px}
 #dform input[type=number],#dform input[type=text],#dform select{width:100%;font:inherit;padding:9px;border-radius:10px;border:1px solid var(--bd);background:var(--bg);color:var(--tx)}#dform .chk input{margin-top:4px}
 </style></head><body class="locked"><a class="sos" href="tel:108">🚨 108</a>
@@ -414,7 +504,7 @@ select{font:inherit;padding:8px;border-radius:10px;border:1px solid var(--bd);ba
 <div class="whow"><span id="who" hidden><img id="pic" alt="" referrerpolicy="no-referrer"><span id="nm"></span><button id="out2" data-i="so"></button></span></div></header>
 <main>
 <section class="card" id="login" hidden><div style="font-size:40px">🔐</div><h2 data-i="lt" style="margin-top:6px"></h2><p data-i="ls"></p><div id="gbtn" style="display:flex;justify-content:center;margin-top:14px"></div><p id="lerr" class="note"></p></section>
-<nav class="tabs" id="tabs"><button data-t="scan" class="on">📷 <span data-i="tab1"></span></button><button data-t="hist">🕘 <span data-i="tab2"></span></button><button data-t="chat">💬 <span data-i="tab3"></span></button><button data-t="near">📍 <span data-i="tab4"></span></button><button data-t="diet">🥗 <span data-i="tab5"></span></button></nav>
+<nav class="tabs" id="tabs"><button data-t="scan" class="on">📷 <span data-i="tab1"></span></button><button data-t="hist">🕘 <span data-i="tab2"></span></button><button data-t="chat">💬 <span data-i="tab3"></span></button><button data-t="near">📍 <span data-i="tab4"></span></button><button data-t="diet">🥗 <span data-i="tab5"></span></button><button data-t="bp">🩺 BP</button></nav>
 <div id="v-scan"><p class="card hello" id="hello" hidden></p>
 <ol class="steps" id="steps"><li class="on"><i>1</i><span data-i="s1"></span></li><li><i>2</i><span data-i="s2"></span></li><li><i>3</i><span data-i="s3"></span></li></ol>
 <section class="card" id="up"><label class="btn pri" for="f" data-i="pick"></label><span class="mu" data-i="drop"></span><input id="f" type="file" accept="image/*" hidden>
@@ -427,6 +517,7 @@ select{font:inherit;padding:8px;border-radius:10px;border:1px solid var(--bd);ba
 <div class="row" id="nf" style="margin:0 0 10px"><button class="chip on" data-f="all" data-i="nba"></button><button class="chip" data-f="p" data-i="nbp"></button><button class="chip" data-f="h" data-i="nbh"></button><button class="chip" data-f="jan" data-i="nbj"></button></div>
 <div id="map"></div><p class="note" id="nst"></p><div id="nl"></div><p class="note" data-i="nbnote"></p></div></section>
 <section id="v-diet" hidden><div class="card"><div id="dform"></div><button class="pri" id="dgo" data-i="dgo" style="width:100%;margin-top:14px;padding:13px;font-size:17px"></button><p class="note" data-i="dnt"></p></div><div id="dout"></div></section>
+<section id="v-bp" hidden><div class="card"><div class="bp-hero"><div style="font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--mu)">ArogyaMitra · Wellness</div><h2 style="margin:4px 0 2px">🩺 Blood pressure companion</h2><p style="margin:0;color:var(--mu)">Read a monitor photo, check the numbers, and keep a simple history.</p><div class="bp-metrics"><div class="bp-metric"><strong id="bpPreviewSys">—</strong><span>SYS · mmHg</span></div><div class="bp-metric"><strong id="bpPreviewDia">—</strong><span>DIA · mmHg</span></div><div class="bp-metric"><strong id="bpPreviewPulse">—</strong><span>Pulse · bpm</span></div></div><div id="bpsuggest" class="bp-suggest" data-level="info" role="status"><h3>💡 Your reading guide</h3><p>Read or enter a BP reading to see general next-step guidance. One reading alone cannot diagnose high blood pressure.</p></div></div><p class="note">Your EC-9000 has no verified data port, so this is not direct device sync. Photograph the current screen or each stored screen shown with MEM. Photo reading is assistive OCR; check every digit before saving.</p><div class="card" style="margin:10px 0;padding:12px"><b>📷 Read a screen with your camera</b><p class="note">Press MEM on the monitor to show a stored measurement, then photograph that screen. Repeat for each saved measurement you want to import.</p><input id="bpPhoto" type="file" accept="image/jpeg,image/png,image/webp" capture="environment"><div class="row"><button class="pri" id="bpReadPhoto">Read photo</button><button id="bpClearPhoto">Clear photo</button></div><img id="bpPhotoPreview" alt="BP display photo preview" hidden style="max-width:100%;max-height:240px;border-radius:12px;margin-top:10px"><p id="bpOcrMsg" class="note" role="status"></p></div><div class="g2" id="bpform"><div><label>Systolic (mmHg)</label><input id="bpsys" type="number" min="50" max="300" placeholder="e.g. 120"></div><div><label>Diastolic (mmHg)</label><input id="bpdia" type="number" min="30" max="200" placeholder="e.g. 80"></div><div><label>Pulse (bpm)</label><input id="bppulse" type="number" min="20" max="250" placeholder="e.g. 72"></div><div><label>Note (optional)</label><input id="bpnote" type="text" maxlength="250" placeholder="e.g. morning, seated"></div></div><div class="row"><button class="pri" id="bpsave">Save reading</button><button id="bpexport">Export CSV</button><button id="bpreload">Refresh history</button></div><p id="bpmsg" class="note" role="status"></p></div><div id="bphistory"></div></section>
 </main>
 <script>
 const L={
@@ -493,7 +584,7 @@ up.addEventListener("drop",e=>load(e.dataTransfer.files[0]));
 function hello(){const e=$("hello");e.hidden=!USER;if(USER)e.innerHTML=`👋 ${L[lang].hello}, <b>${esc((USER.name||USER.email).split(" ")[0])}</b>!<br><small>${esc(USER.email)} · ${HIST.length} ${L[lang].saved}</small>`}
 function hist(){const T=L[lang];$("v-hist").innerHTML=HIST.length?HIST.map((h,i)=>`<article class="card hi"><div><b>${new Date(h.t*1000).toLocaleDateString(CODE[lang])}</b><br>${h.res.medicines.map(m=>esc(m.name)).join(", ")}</div><button data-h="${i}">${T.open}</button></article>`).join(""):`<p class="card">${T.nohist}</p>`}
 function drawChat(){const m=$("msgs");m.innerHTML=CHAT.map(x=>`<div class="b ${x.r=="user"?"u":"a"}">${esc(x.t)}</div>`).join("");m.scrollTop=m.scrollHeight}
-function tab(n){["scan","hist","chat","near","diet"].forEach(x=>$("v-"+x).hidden=x!=n);[...$("tabs").children].forEach(b=>b.classList.toggle("on",b.dataset.t==n));if(n=="chat")drawChat();if(n!="near"&&WID!=null){navigator.geolocation.clearWatch(WID);WID=null}if(n=="near"&&MAP)setTimeout(()=>MAP.invalidateSize(),60)}
+function tab(n){["scan","hist","chat","near","diet","bp"].forEach(x=>$("v-"+x).hidden=x!=n);[...$("tabs").children].forEach(b=>b.classList.toggle("on",b.dataset.t==n));if(n=="chat")drawChat();if(n=="bp")bpLoad();if(n!="near"&&WID!=null){navigator.geolocation.clearWatch(WID);WID=null}if(n=="near"&&MAP)setTimeout(()=>MAP.invalidateSize(),60)}
 async function say(){const q=$("ci").value.trim();if(!q)return;if(RED.test(q))alarm(q);$("ci").value="";CHAT.push({r:"user",t:q});const a={r:"model",t:"…"};CHAT.push(a);drawChat();
   const ms=(res&&res.readable?res.medicines:(HIST[0]&&HIST[0].res.medicines)||[]);
   try{const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question:q,lang,medicines:ms})});const d=await r.json();a.t=d.answer||d.error||L[lang].err}
@@ -578,6 +669,32 @@ $("dgo").onclick=async()=>{const T=L[lang],b=$("dgo");
     else{DR=d;DAY=0;dshow()}}
   catch(e){DR=null;$("dout").innerHTML=`<p class="card">${T.err}</p>`}
   b.disabled=false};
+let BP_ROWS=[], BP_PHOTO_DATA="";
+function bpGuide(sys,dia,pulse,updateFields=false){
+  const box=$("bpsuggest");
+  if(sys===""||dia===""||pulse===""||sys==null||dia==null||pulse==null){
+    box.dataset.level="info";box.innerHTML="<h3>💡 Your reading guide</h3><p>Read a photo or enter all three values to see general next-step guidance.</p>";
+    if(updateFields){$("bpPreviewSys").textContent="—";$("bpPreviewDia").textContent="—";$("bpPreviewPulse").textContent="—"}return;
+  }
+  sys=Number(sys);dia=Number(dia);pulse=Number(pulse);
+  $("bpPreviewSys").textContent=sys;$("bpPreviewDia").textContent=dia;$("bpPreviewPulse").textContent=pulse;
+  let level="normal",title="Keep tracking",body="This single reading is not in the usual high range. Sit quietly for 5 minutes and take 2 readings one minute apart; record both and discuss repeated concerns with a clinician.";
+  if(sys>=180||dia>=120){level="urgent";title="Very high reading — act now";body="Wait at least 1 minute and repeat the measurement. If it remains around 180 systolic or 120 diastolic or higher, seek urgent medical advice immediately. If you have chest pain, shortness of breath, weakness/numbness, vision change, confusion or difficulty speaking, call emergency services (India: 112) now."}
+  else if(sys<90||dia<60){level="high";title="Lower-than-usual reading";body="If you feel faint, dizzy, weak or unwell, sit or lie down safely and contact a healthcare professional. Seek urgent help for fainting, confusion, chest pain or severe symptoms. If you feel well, repeat the reading and ask a clinician if this is unusual for you."}
+  else if(sys>=140||dia>=90){level="high";title="High reading";body="A single result cannot diagnose hypertension. Rest quietly for 5 minutes, take 2 more readings one minute apart, and record them. If readings repeatedly stay at or above 140/90, arrange a healthcare appointment."}
+  else if(sys>=130||dia>=80){level="high";title="Above the preferred range";body="This is above the preferred range in some guidelines. Rest quietly for 5 minutes and take 2 readings one minute apart. Track readings over several days and discuss repeated elevated results with a healthcare professional."}
+  else if(sys>=120){level="info";title="Slightly raised systolic value";body="If the diastolic value is below 80, this falls in the elevated range used by some guidelines. Focus on regular activity, less salt, avoiding tobacco, and taking prescribed medicines as directed. Recheck on different days."}
+  if(pulse<50||pulse>120){body+=" Pulse is also outside a typical adult resting range; repeat when rested and discuss persistent unusual values with a clinician, especially if symptoms occur."}
+  box.dataset.level=level;box.innerHTML=`<h3>${title}</h3><p>${body}</p><p style="font-size:12px;opacity:.85">General guidance only; thresholds vary by guideline and individual circumstances. Do not change medicines based on this app.</p>`;
+}
+["bpsys","bpdia","bppulse"].forEach(id=>$(id).addEventListener("input",()=>bpGuide($("bpsys").value,$("bpdia").value,$("bppulse").value,true)));
+$("bpPhoto").onchange=async e=>{const f=e.target.files&&e.target.files[0];if(!f){BP_PHOTO_DATA="";return}if(!["image/jpeg","image/png","image/webp"].includes(f.type)){$("bpOcrMsg").textContent="Please choose a JPEG, PNG or WebP photo.";return}if(f.size>5*1024*1024){$("bpOcrMsg").textContent="Photo must be 5 MB or smaller.";e.target.value="";return}const reader=new FileReader();reader.onload=()=>{BP_PHOTO_DATA=String(reader.result);$("bpPhotoPreview").src=BP_PHOTO_DATA;$("bpPhotoPreview").hidden=false;$("bpOcrMsg").textContent="Photo ready. Tap Read photo."};reader.readAsDataURL(f)};
+$("bpClearPhoto").onclick=()=>{$("bpPhoto").value="";BP_PHOTO_DATA="";$("bpPhotoPreview").hidden=true;$("bpPhotoPreview").removeAttribute("src");$("bpOcrMsg").textContent=""};
+$("bpReadPhoto").onclick=async()=>{const msg=$("bpOcrMsg");if(!BP_PHOTO_DATA){msg.textContent="Take or select a photo of the BP screen first.";return}const b=$("bpReadPhoto");b.disabled=true;msg.textContent="Reading display… please verify the result.";try{const r=await fetch("/api/bp/read-display",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:BP_PHOTO_DATA})}),d=await r.json();if(!r.ok)throw new Error(d.error||"Could not read photo");if(!d.readable)throw new Error("The digits could not be read confidently. Try a clearer photo or enter the values manually.");$("bpsys").value=d.systolic;$("bpdia").value=d.diastolic;$("bppulse").value=d.pulse;bpGuide(d.systolic,d.diastolic,d.pulse,true);const label=d.display_type==="memory"?"MEM screen photo":"BP display photo";$("bpnote").value=[$("bpnote").value,label,d.note].filter(Boolean).join(" — ").slice(0,250);msg.textContent=(d.warning||"Verify the digits against the monitor.")+" Then tap Save reading."}catch(e){msg.textContent=e.message||"Could not read photo."}finally{b.disabled=false}};
+async function bpLoad(){const msg=$("bpmsg");try{const r=await fetch("/api/bp");const d=await r.json();if(!r.ok)throw new Error(d.error||"Could not load history");BP_ROWS=d.readings||[];$("bphistory").innerHTML=BP_ROWS.length?BP_ROWS.map(x=>`<article class="card hi"><div><b>${esc(x.systolic)}/${esc(x.diastolic)} mmHg</b> · pulse ${esc(x.pulse)} bpm<br><small>${esc(x.measured_at)} · ${esc(x.source)}</small>${x.note?`<br><small>${esc(x.note)}</small>`:""}</div></article>`).join(""):'<p class="card">No BP readings saved yet.</p>';if(msg)msg.textContent="History updated."}catch(e){if(msg)msg.textContent=e.message||"Could not load BP history."}}
+$("bpsave").onclick=async()=>{const msg=$("bpmsg"),payload={systolic:$("bpsys").value,diastolic:$("bpdia").value,pulse:$("bppulse").value,note:$("bpnote").value};try{const r=await fetch("/api/bp",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)}),d=await r.json();if(!r.ok)throw new Error(d.error||"Could not save reading");$("bpsys").value=$("bpdia").value=$("bppulse").value=$("bpnote").value="";bpGuide(null,null,null,true);msg.textContent="Reading saved.";await bpLoad()}catch(e){msg.textContent=e.message||"Could not save reading."}};
+$("bpreload").onclick=bpLoad;
+$("bpexport").onclick=()=>{const rows=[["Measured at","Systolic mmHg","Diastolic mmHg","Pulse bpm","Source","Note"],...BP_ROWS.map(x=>[x.measured_at,x.systolic,x.diastolic,x.pulse,x.source,x.note])];const csv=rows.map(r=>r.map(v=>'"'+String(v??"").replace(/"/g,'""')+'"').join(",")).join("\r\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"}));a.download="bp_history.csv";a.click();URL.revokeObjectURL(a.href)};
 const SCH="__SAHAYAI__";
 const RED=/chest pain|can'?t breathe|trouble breathing|short(ness)? of breath|unconscious|faint|seizure|bleeding|overdose|poison|stroke|allergic reaction|suicid|kill myself|end my life|நெஞ்சு வலி|மூச்சு|மயக்கம்|வலிப்பு|இரத்தப்போக்கு|விஷம்|தற்கொலை|सीने में दर्द|साँस|सांस|बेहोश|दौरा|खून|ज़हर|जहर|ओवरडोज|आत्महत्या/i;
 const SELF=/suicid|kill myself|end my life|தற்கொலை|आत्महत्या/i;
