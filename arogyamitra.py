@@ -498,6 +498,54 @@ select{font:inherit;padding:8px;border-radius:10px;border:1px solid var(--bd);ba
 .g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}#bpform label{display:block;font-size:14px;color:var(--mu);margin-bottom:3px}#bpform input{width:100%;font:inherit;padding:9px;border-radius:10px;border:1px solid var(--bd);background:var(--bg);color:var(--tx)}@media(max-width:520px){.g2{grid-template-columns:1fr}}
 #dform label{display:block;font-size:14px;color:var(--mu);margin-bottom:3px}#dform label.chk{display:flex;gap:8px;align-items:flex-start;margin:10px 0 0;color:var(--tx);font-size:15px}
 #dform input[type=number],#dform input[type=text],#dform select{width:100%;font:inherit;padding:9px;border-radius:10px;border:1px solid var(--bd);background:var(--bg);color:var(--tx)}#dform .chk input{margin-top:4px}
+
+/* ===== ArogyaMitra Professional UI Upgrade ===== */
+:root{--bg:#f4f8fb;--card:#fff;--tx:#0f2430;--mu:#5d7484;--ac:#0f766e;--ac2:#e6f6f3;--accent2:#2563eb;--bd:#dfe9ef;--wa:#fff7e0;--wt:#8a5a00;--danger:#dc2626;--radius:18px;--shadow:0 10px 30px rgba(15,36,48,.08);--shadow-lg:0 18px 50px rgba(15,36,48,.14)}
+html{scroll-behavior:smooth}
+body{background:radial-gradient(900px 500px at 85% -10%,rgba(37,99,235,.10),transparent 60%),radial-gradient(700px 450px at 0% 0%,rgba(13,148,136,.12),transparent 55%),var(--bg);color:var(--tx);letter-spacing:.1px}
+main{max-width:860px;padding:0 18px 56px}
+header.hero{background:linear-gradient(135deg,#0b6e66 0%,#0e7490 48%,#2563eb 100%);padding:34px 18px 76px;border-radius:0 0 34px 34px;box-shadow:0 18px 45px rgba(11,110,102,.25)}
+header.hero h1{font-size:clamp(30px,6vw,40px);letter-spacing:-.5px;text-shadow:0 2px 18px rgba(0,0,0,.18)}
+header.hero .sub{max-width:620px;font-size:16px;opacity:.95}
+header.hero::before,header.hero::after{filter:blur(2px);opacity:.16}
+.card{background:rgba(255,255,255,.92);backdrop-filter:blur(10px);border:1px solid rgba(223,233,239,.9);border-radius:22px;padding:22px;box-shadow:var(--shadow);transition:transform .22s ease,box-shadow .22s ease}
+.card:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg)}
+.med{border-left:5px solid var(--ac)}
+.med h3{font-size:18px;letter-spacing:-.2px}
+.tabs{background:rgba(255,255,255,.9);backdrop-filter:blur(12px);border:1px solid var(--bd);border-radius:18px;padding:6px;box-shadow:var(--shadow);position:sticky;top:10px;z-index:30}
+.tabs button{border-radius:13px;font-weight:600;padding:11px 6px;color:var(--mu);transition:.2s ease}
+.tabs button:hover{color:var(--ac);background:#f0faf8}
+.tabs button.on{background:linear-gradient(135deg,var(--ac),#0e7490);color:#fff;box-shadow:0 8px 20px rgba(13,148,136,.28)}
+button,.btn{border-radius:14px;font-weight:650;transition:transform .15s ease,box-shadow .2s ease,background .2s ease}
+button:hover,.btn:hover{transform:translateY(-1px)}
+button:active{transform:translateY(0)}
+.pri{background:linear-gradient(135deg,#0f766e,#0e7490 60%,#2563eb);color:#fff;border:0;box-shadow:0 10px 24px rgba(14,116,144,.25)}
+.pri:hover{box-shadow:0 14px 30px rgba(14,116,144,.32)}
+.pri:disabled{opacity:.55;box-shadow:none}
+.chip{border-radius:999px;font-weight:600}
+.chip.on{background:linear-gradient(135deg,var(--ac),#0e7490);color:#fff;border-color:transparent}
+.bp-hero{background:linear-gradient(135deg,rgba(15,118,110,.14),rgba(37,99,235,.12));border:1px solid rgba(13,148,136,.18);border-radius:24px;padding:24px}
+.bp-metrics{gap:12px;margin-top:16px}
+.bp-metric{border-radius:20px;padding:18px 12px;background:linear-gradient(180deg,#fff,#f8fbfd);border:1px solid var(--bd);box-shadow:0 6px 18px rgba(15,36,48,.05)}
+.bp-metric strong{font-size:clamp(28px,7vw,38px);font-weight:800;color:#0b6e66}
+.bp-metric span{font-weight:650;text-transform:uppercase;letter-spacing:.08em}
+.bp-suggest{border-radius:20px;padding:20px}
+.bp-suggest[data-level="urgent"]{background:linear-gradient(135deg,#fff1f0,#ffe4e1);border-color:#fecaca;color:#8b2115}
+.bp-suggest[data-level="high"]{background:linear-gradient(135deg,#fff8e1,#fff2c7);border-color:#fde68a;color:#7c4a03}
+.bp-suggest[data-level="normal"]{background:linear-gradient(135deg,#e8f8f4,#dcf3ee);border-color:#a7e3d6;color:#0b5f57}
+input,select,textarea{border-radius:13px!important;border:1.5px solid var(--bd)!important;background:#fbfdfe!important;padding:12px!important;transition:border-color .18s ease,box-shadow .18s ease}
+input:focus,select:focus,textarea:focus{outline:none!important;border-color:#14b8a6!important;box-shadow:0 0 0 4px rgba(20,184,166,.14)!important;background:#fff!important}
+label{font-weight:600;color:#41586a}
+.up{border:2px dashed #b9d8d2!important;background:linear-gradient(180deg,#f7fdfb,#eef8f6)!important;border-radius:22px!important;transition:.2s ease}
+.up:hover,.up.drag{border-color:var(--ac)!important;background:#e8f7f3!important}
+.msgs .b{border-radius:18px;padding:12px 15px;box-shadow:0 4px 14px rgba(15,36,48,.06)}
+.b.u{background:linear-gradient(135deg,#0f766e,#0e7490);border-bottom-right-radius:6px}
+.b.a{background:#f3f8fa;border:1px solid var(--bd);border-bottom-left-radius:6px}
+.r{padding:8px 0;border-bottom:1px dashed #e4edf2}
+.r:last-child{border-bottom:0}
+.sos{background:linear-gradient(135deg,#ef4444,#dc2626);border-radius:999px;padding:12px 18px;box-shadow:0 12px 28px rgba(220,38,38,.35);font-weight:800}
+@media (prefers-color-scheme:dark){:root{--bg:#0a1518;--card:#122326;--tx:#e9f5f3;--mu:#9db4b0;--bd:#22383c;--ac2:#173c38;--shadow:0 10px 30px rgba(0,0,0,.35);--shadow-lg:0 18px 50px rgba(0,0,0,.45)}body{background:radial-gradient(900px 500px at 85% -10%,rgba(37,99,235,.16),transparent 60%),radial-gradient(700px 450px at 0% 0%,rgba(13,148,136,.18),transparent 55%),var(--bg)}.card,.tabs{background:rgba(18,35,38,.92)}.bp-metric{background:linear-gradient(180deg,#142a2e,#102125)}.b.a{background:#172e32}input,select,textarea{background:#0f2023!important;color:#e9f5f3!important}}
+
 </style></head><body class="locked"><a class="sos" href="tel:108">🚨 108</a>
 <header class="hero"><button id="big" title="Large text">A+</button><div class="logo">💊</div><h1>ArogyaMitra</h1><p class="sub" data-i="sub"></p>
 <div class="langs" id="langs"><button data-l="en" class="on">English</button><button data-l="ta">தமிழ்</button><button data-l="hi">हिन्दी</button></div>
